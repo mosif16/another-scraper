@@ -1,5 +1,6 @@
 import * as DDG from 'duck-duck-scrape';
 import { SafeSearchType } from 'duck-duck-scrape';
+import { RateLimiter } from '../utils/RateLimiter.js';
 
 // Update type definitions to match duck-duck-scrape options
 interface ExtendedSearchOptions extends DDG.SearchOptions {
@@ -7,117 +8,176 @@ interface ExtendedSearchOptions extends DDG.SearchOptions {
 }
 
 export class DuckDuckGoService {
-  private safeSearch: SafeSearchType = SafeSearchType.MODERATE;
+  private safeSearchSetting: SafeSearchType = SafeSearchType.MODERATE;
+  private rateLimiter: RateLimiter;
+  private retryCount: number = 3;
+  private retryDelay: number = 1000;
 
-  async regularSearch(query: string) {
-    const results = await DDG.search(query, { 
-      safeSearch: this.safeSearch,
-      time: 'w'  // Last week results
-    });
-    return this.formatSearchResults(results);
+  constructor() {
+    this.rateLimiter = new RateLimiter(0.5); // 1 request per 2 seconds
+  }
+
+  private async executeWithRetry<T>(
+    operation: () => Promise<T>,
+    retries: number = this.retryCount
+  ): Promise<T> {
+    try {
+      await this.rateLimiter.waitForNext();
+      return await operation();
+    } catch (error) {
+      if (retries > 0) {
+        await new Promise(resolve => setTimeout(resolve, this.retryDelay));
+        return this.executeWithRetry(operation, retries - 1);
+      }
+      throw error;
+    }
+  }
+
+  async regularSearch(query: string): Promise<string> {
+    try {
+      const results = await this.executeWithRetry(() => 
+        DDG.search(query, {
+          safeSearch: this.safeSearchSetting,
+          time: 'w'
+        })
+      );
+      return this.formatSearchResults(results);
+    } catch (error) {
+      throw new Error(`DDG search failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   }
 
   async imageSearch(query: string) {
-    // Use separate image search method
-    const results = await DDG.searchImages(query, { 
-      safeSearch: this.safeSearch 
-    });
-    return this.formatImageResults(results);
+    try {
+      const results = await this.executeWithRetry(() => 
+        DDG.searchImages(query, { 
+          safeSearch: this.safeSearchSetting 
+        })
+      );
+      return this.formatImageResults(results);
+    } catch (error) {
+      throw new Error(`DDG image search failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   }
 
   async videoSearch(query: string) {
-    // Use separate video search method
-    const results = await DDG.searchVideos(query, {
-      safeSearch: this.safeSearch
-    });
-    return this.formatVideoResults(results);
+    try {
+      const results = await this.executeWithRetry(() => 
+        DDG.searchVideos(query, {
+          safeSearch: this.safeSearchSetting
+        })
+      );
+      return this.formatVideoResults(results);
+    } catch (error) {
+      throw new Error(`DDG video search failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   }
 
   async newsSearch(query: string) {
-    // Use regular search with time parameter
-    const results = await DDG.search(query, {
-      safeSearch: this.safeSearch,
-      time: 'd'  // Last day for news
-    });
-    return this.formatNewsResults(results);
+    try {
+      const results = await this.executeWithRetry(() => 
+        DDG.search(query, {
+          safeSearch: this.safeSearchSetting,
+          time: 'd'  // Last day for news
+        })
+      );
+      return this.formatNewsResults(results);
+    } catch (error) {
+      throw new Error(`DDG news search failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   }
 
   async getTimeForLocation(location: string) {
-    const time = await DDG.time(location);
-    return this.formatTimeResult(time);
+    try {
+      const time = await this.executeWithRetry(() => DDG.time(location));
+      return this.formatTimeResult(time);
+    } catch (error) {
+      throw new Error(`DDG time retrieval failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   }
 
   async getWeatherForecast(location: string) {
-    const forecast = await DDG.forecast(location);
-    return this.formatForecastResult(forecast);
+    try {
+      const forecast = await this.executeWithRetry(() => DDG.forecast(location));
+      return this.formatForecastResult(forecast);
+    } catch (error) {
+      throw new Error(`DDG weather forecast retrieval failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   }
 
   async getDictionaryInfo(word: string) {
-    const [definition, pronunciation, hyphenation] = await Promise.all([
-      DDG.dictionaryDefinition(word),
-      DDG.dictionaryAudio(word),
-      DDG.dictionaryHyphenation(word)
-    ]);
-    return this.formatDictionaryResult(definition, pronunciation, hyphenation);
+    try {
+      const [definition, pronunciation, hyphenation] = await Promise.all([
+        this.executeWithRetry(() => DDG.dictionaryDefinition(word)),
+        this.executeWithRetry(() => DDG.dictionaryAudio(word)),
+        this.executeWithRetry(() => DDG.dictionaryHyphenation(word))
+      ]);
+      return this.formatDictionaryResult(definition, pronunciation, hyphenation);
+    } catch (error) {
+      throw new Error(`DDG dictionary info retrieval failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   }
 
   async getStockInfo(symbol: string) {
     try {
-      const stockInfo = await DDG.stocks(symbol);
+      const stockInfo = await this.executeWithRetry(() => DDG.stocks(symbol));
       return this.formatStockInfo(stockInfo);
     } catch (error) {
-      console.error('DDG stock info error:', error);
-      throw error;
+      throw new Error(`DDG stock info retrieval failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
   async getCurrencyConversion(from: string, to: string, amount: number) {
     try {
-      const conversion = await DDG.currency(from, to, amount);
+      const conversion = await this.executeWithRetry(() => DDG.currency(from, to, amount));
       return this.formatCurrencyConversion(conversion);
     } catch (error) {
-      console.error('DDG currency conversion error:', error);
-      throw error;
+      throw new Error(`DDG currency conversion failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
   async getDefinition(word: string) {
     try {
-      const definition = await DDG.dictionaryDefinition(word);
+      const definition = await this.executeWithRetry(() => DDG.dictionaryDefinition(word));
       return this.formatDefinition(definition);
     } catch (error) {
-      console.error('DDG definition error:', error);
-      throw error;
+      throw new Error(`DDG definition retrieval failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
   async findVideoContent(query: string) {
     try {
-      // First try video search with recent results
-      const videoResults = await DDG.search(query + ' video', {
-        safeSearch: this.safeSearch,
-        time: 'w' // Last week
-      });
+      const videoResults = await this.executeWithRetry(() => 
+        DDG.search(query + ' video', {
+          safeSearch: this.safeSearchSetting,
+          time: 'w' // Last week
+        })
+      );
 
-      // Then try regular search with time filter
-      const webResults = await DDG.search(query + ' official video', {
-        safeSearch: this.safeSearch,
-        time: 'm' // Last month for broader coverage
-      });
+      const webResults = await this.executeWithRetry(() => 
+        DDG.search(query + ' official video', {
+          safeSearch: this.safeSearchSetting,
+          time: 'm' // Last month for broader coverage
+        })
+      );
 
       return this.formatVideoContentResults(videoResults, webResults);
     } catch (error) {
-      console.error('Video content search error:', error);
-      throw error;
+      throw new Error(`Video content search failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
-  private formatSearchResults(results: any) {
-    if (results.noResults) return 'No results found.';
-    return results.results
-      ?.slice(0, 5)
-      ?.map((r: any) => `• ${r.title}\n  ${r.description}\n  URL: ${r.url}`)
-      .join('\n\n') || 'No results available';
+  private formatSearchResults(results: any): string {
+    if (!results || results.noResults) return 'No results found.';
+    try {
+      return results.results
+        ?.slice(0, 5)
+        ?.map((r: any) => `• ${r.title}\n  ${r.description}\n  URL: ${r.url}`)
+        .join('\n\n') || 'No results available';
+    } catch (error) {
+      console.error('Error formatting results:', error);
+      return 'Error formatting search results';
+    }
   }
 
   private formatImageResults(results: any) {
@@ -199,14 +259,12 @@ Market Cap: ${info.marketCap}
     const results: string[] = [];
     const seenUrls = new Set<string>();
 
-    // Helper to extract YouTube/video URLs
     const extractVideoUrls = (text: string) => {
       const youtubeRegex = /(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/(watch\?v=)?([a-zA-Z0-9_-]+)/i;
       const matches = text.match(youtubeRegex);
       return matches ? matches[0] : null;
     };
 
-    // Process video results
     if (videoResults?.results) {
       for (const result of videoResults.results) {
         const videoUrl = extractVideoUrls(result.url || result.description || '');
@@ -217,7 +275,6 @@ Market Cap: ${info.marketCap}
       }
     }
 
-    // Process web results
     if (webResults?.results) {
       for (const result of webResults.results) {
         const videoUrl = extractVideoUrls(result.url || result.description || '');

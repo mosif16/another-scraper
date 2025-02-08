@@ -5,6 +5,7 @@ import { PerplexicaSearch, SearchResponse } from './PerplexicaSearch.js';
 import { DuckDuckGoService } from './services/DuckDuckGoService.js';
 import { BraveSearchService } from './services/BraveSearchService.js';
 import { OutputFormatter } from './services/OutputFormatter.js';
+import { SearchOrchestrator } from './services/SearchOrchestrator.js';
 
 // Load environment variables
 config();
@@ -277,14 +278,10 @@ function isNewsRelated(text: string): boolean {
 
 // Add status emoji constants
 const STATUS = {
-  SUCCESS: '✅',
-  ERROR: '❌',
-  PENDING: '⏳',
-  WARNING: '⚠️',
-  BRAVE: '🦁',
-  DDG: '🔍',
-  PERPLEXICA: '🌐',
-  OLLAMA: '🤖'
+  SUCCESS: '✅' as const,
+  ERROR: '❌' as const,
+  PENDING: '⏳' as const,
+  WARNING: '⚠️' as const
 };
 
 // Modify message handler to use time-sensitive search
@@ -421,10 +418,11 @@ CONTENT: ${content.length > 500 ? content.substring(0, 500) + '...' : content}`;
         .map(msg => `${msg.role}: ${msg.content}`)
         .join('\n');
 
+      // Modify the prompt to encourage structured responses
       const prompt = `
 You are an AI assistant with access to web search results from multiple sources.
-Use this information to provide accurate, well-informed responses.
-If the user is asking about videos, focus on providing direct video links when available.
+Format your response in a clear, structured way using markdown headers (###) for different sections.
+Always include relevant URLs as sources.
 
 Previous conversation:
 ${historyContext}
@@ -438,6 +436,12 @@ ${braveSearchContext}
 ${videoContext}
 
 User Query: ${messageText}
+
+Structure your response with:
+1. A brief overview/direct answer first
+2. Key points using bullet points (•)
+3. Additional details in separate sections using ### headers
+4. Sources and references at the end
 
 Think through the available information step by step, then provide your response after </think>.
 Let's approach this step by step:`;
@@ -480,33 +484,34 @@ Let's approach this step by step:`;
         // Send response in chunks if needed
         const maxLength = 4096;
         if (formattedResponse.length <= maxLength) {
-          await ctx.reply(formattedResponse);
+          await ctx.reply(formattedResponse, { parse_mode: 'Markdown' });
         } else {
-          // Split by sections to maintain formatting
-          const sections = formattedResponse.split('\n\n');
+          // Split by sections while preserving formatting
+          const sections = formattedResponse.split(/(?=\n### )/);
           let currentMessage = '';
           
           for (const section of sections) {
             if ((currentMessage + section).length > maxLength) {
               if (currentMessage) {
-                await ctx.reply(currentMessage);
+                await ctx.reply(currentMessage, { parse_mode: 'Markdown' });
                 currentMessage = '';
               }
+              // Handle long sections
               if (section.length > maxLength) {
-                // Split long sections
-                for (let i = 0; i < section.length; i += maxLength) {
-                  await ctx.reply(section.substring(i, i + maxLength));
+                const chunks = section.match(new RegExp(`.{1,${maxLength}}`, 'g')) || [];
+                for (const chunk of chunks) {
+                  await ctx.reply(chunk, { parse_mode: 'Markdown' });
                 }
               } else {
                 currentMessage = section;
               }
             } else {
-              currentMessage += (currentMessage ? '\n\n' : '') + section;
+              currentMessage += (currentMessage ? '\n' : '') + section;
             }
           }
           
           if (currentMessage) {
-            await ctx.reply(currentMessage);
+            await ctx.reply(currentMessage, { parse_mode: 'Markdown' });
           }
         }
 
@@ -545,3 +550,21 @@ bot.launch().then(() => {
 // Enable graceful stop
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
+const searchOrchestrator = new SearchOrchestrator();
+
+// Replace direct service calls with orchestrator
+bot.command('search', async (ctx) => {
+  const query = ctx.message.text.replace('/search', '').trim();
+  if (!query) {
+    return ctx.reply('Please provide a search query');
+  }
+
+  try {
+    const results = await searchOrchestrator.search(query);
+    const formattedResponse = searchOrchestrator.formatResults(results);
+    await ctx.reply(formattedResponse);
+  } catch (error) {
+    await ctx.reply('Search failed. Please try again later.');
+  }
+});

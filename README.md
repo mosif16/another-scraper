@@ -1,48 +1,93 @@
 # AI-Powered Telegram Chat Bot
 
-A Telegram bot that combines Ollama's local AI models with Perplexica's web search capabilities for enhanced conversational responses.
+A sophisticated Telegram bot that combines multiple search engines (DuckDuckGo, Perplexica, Brave Search) with Ollama's local AI models for enhanced, structured responses.
 
 ## Features
 
+### Core Features
 - 🤖 Local AI model integration via Ollama
-- 🔍 Web search capabilities using Perplexica
-- 💬 Telegram bot interface
-- 🧵 Conversation history management
-- 🌐 Real-time web search integration
-- 🔐 Environment-based configuration
+- 🔍 Multi-engine web search capabilities:
+  - Perplexica semantic search
+  - DuckDuckGo web search
+  - Brave Search integration
+- 💬 Intelligent conversation management
+- 📊 Structured response format
+- 🔄 Automatic fallback between search engines
+
+### Search Commands
+- `/search` - Perform a comprehensive multi-engine search
+- `/news` - Search recent news articles
+- `/image` - Search for images
+- `/video` - Search for videos
+- `/find_video` - Advanced video content search
+
+### Utility Commands
+- `/stocks SYMBOL` - Get stock information
+- `/convert FROM TO AMOUNT` - Currency conversion
+- `/define WORD` - Word definitions
+- `/dict WORD` - Detailed dictionary information
+- `/time LOCATION` - Check time in different locations
+- `/weather LOCATION` - Get weather forecasts
+
+### Chat Management
+- `/start_chat` - Begin a new chat session
+- `/stop_chat` - End current chat session
+
+## Response Format
+
+The bot provides structured responses in the following format:
+
+```
+Search Sources Used:
+✅ Perplexica
+✅ DuckDuckGo
+✅ Brave Search
+
+[Direct Answer/Overview]
+
+### Key Points
+• Point 1
+• Point 2
+• Point 3
+
+### Additional Information
+[Detailed content]
+
+### Sources
+[1] https://source1.com
+[2] https://source2.com
+```
 
 ## Prerequisites
 
 - Node.js >= 18.0.0
 - Docker (for Perplexica)
 - Ollama installed locally
-- A Telegram Bot Token
+- Telegram Bot Token
+- Brave Search API key (optional)
 
 ## Installation
 
-1. Clone the repository:
+1. Clone and setup:
 ```bash
 git clone <your-repo-url>
 cd <your-repo-directory>
-```
-
-2. Install dependencies:
-```bash
 npm install
 ```
 
-3. Create environment file:
+2. Configure environment:
 ```bash
 cp .env.example .env
 ```
 
-4. Configure your `.env` file:
+3. Set up environment variables:
 ```properties
-BOT_TOKEN=your_telegram_bot_token_here
+BOT_TOKEN=your_telegram_bot_token
 ALLOWED_CHAT_ID=your_telegram_chat_id
 OLLAMA_BASE_URL=http://localhost:11434
 DEFAULT_MODEL=mistral-small:24b-instruct-2501-q4_K_M
 PERPLEXICA_BASE_URL=http://localhost:3001
+BRAVE_SEARCH_API_KEY=your_brave_search_api_key
 ```
 
 ## Setting up Perplexica
@@ -115,18 +160,43 @@ npm start
 | OLLAMA_BASE_URL | Ollama API URL | http://localhost:11434 |
 | DEFAULT_MODEL | Default Ollama model | mistral-small:24b-instruct-2501-q4_K_M |
 | PERPLEXICA_BASE_URL | Perplexica API URL | http://localhost:3001 |
+| BRAVE_SEARCH_API_KEY | Brave Search API Key | Optional |
 
 ## Project Structure
 
 ```
 .
-├── .env                 # Environment variables
-├── .env.example        # Example environment file
-├── server.ts           # Main bot server
-├── PerplexicaSearch.ts # Perplexica integration
-├── client.ts           # Web client (optional)
-└── package.json        # Project dependencies
+├── services/
+│   ├── DuckDuckGoService.ts    # DuckDuckGo integration
+│   ├── OutputFormatter.ts      # Response formatting
+│   ├── SearchOrchestrator.ts  # Search orchestration
+│   └── BraveSearchService.ts   # Brave Search integration
+├── utils/
+│   └── RateLimiter.ts         # Rate limiting utility
+├── server.ts                   # Main bot server
+├── PerplexicaSearch.ts        # Perplexica integration
+└── package.json               # Project dependencies
 ```
+
+## New Features
+
+### Multi-Engine Search
+- Automatic fallback between search engines
+- Concurrent searches for faster responses
+- Intelligent error handling
+- Rate limiting protection
+
+### Structured Output
+- Clear section organization
+- Automatic bullet point formatting
+- Source URL extraction and listing
+- Markdown formatting support
+
+### Enhanced Error Handling
+- Graceful degradation when services fail
+- Clear error reporting
+- Automatic retry mechanisms
+- Rate limit awareness
 
 ## Contributing
 
@@ -150,6 +220,21 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ## Troubleshooting
 
 ### Common Issues
+
+1. **Structured Output Issues:**
+   - Check markdown formatting in responses
+   - Verify section headers are properly formatted
+   - Ensure URLs are properly extracted
+
+2. **Search Engine Failures:**
+   - Monitor individual search engine statuses
+   - Check rate limits
+   - Verify API keys and endpoints
+
+3. **Response Formatting:**
+   - Check message length limits
+   - Verify markdown parsing
+   - Monitor section splitting
 
 1. **Bot not responding:**
    - Check if Ollama is running
