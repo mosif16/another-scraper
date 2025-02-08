@@ -2,8 +2,7 @@ import { config } from 'dotenv';
 import { Telegraf } from 'telegraf';
 import axios from 'axios';
 import { PerplexicaSearch, SearchResponse } from './PerplexicaSearch.js';
-import { FirecrawlService } from './FirecrawlService.js';
-import { FirecrawlResponse, FirecrawlResult } from './types.js';
+import { DuckDuckGoService } from './services/DuckDuckGoService.js';
 
 // Load environment variables
 config();
@@ -23,7 +22,7 @@ if (!BOT_TOKEN || !ALLOWED_CHAT_ID) {
 // Initialize bot and services
 const bot = new Telegraf(BOT_TOKEN);
 const perplexicaSearch = new PerplexicaSearch(process.env.PERPLEXICA_BASE_URL);
-const firecrawl = new FirecrawlService('http://localhost:3002'); // Use local Docker instance
+const ddg = new DuckDuckGoService();
 
 // Store active chats
 const activeChats = new Set<number>();
@@ -107,6 +106,160 @@ bot.command('stop_chat', async (ctx) => {
   await ctx.reply('Chat session ended and history cleared.');
 });
 
+// Add new commands
+bot.command('stocks', async (ctx) => {
+  const symbol = ctx.message.text.split(' ')[1];
+  if (!symbol) {
+    await ctx.reply('Please provide a stock symbol. Example: /stocks AAPL');
+    return;
+  }
+  
+  try {
+    const stockInfo = await ddg.getStockInfo(symbol);
+    await ctx.reply(stockInfo);
+  } catch (error) {
+    await ctx.reply('Error fetching stock information.');
+  }
+});
+
+bot.command('convert', async (ctx) => {
+  const [, from, to, amount] = ctx.message.text.split(' ');
+  if (!from || !to || !amount) {
+    await ctx.reply('Please use format: /convert USD EUR 100');
+    return;
+  }
+  
+  try {
+    const conversion = await ddg.getCurrencyConversion(from, to, Number(amount));
+    await ctx.reply(conversion);
+  } catch (error) {
+    await ctx.reply('Error converting currency.');
+  }
+});
+
+bot.command('define', async (ctx) => {
+  const word = ctx.message.text.split(' ')[1];
+  if (!word) {
+    await ctx.reply('Please provide a word to define. Example: /define happy');
+    return;
+  }
+  
+  try {
+    const definition = await ddg.getDefinition(word);
+    await ctx.reply(definition);
+  } catch (error) {
+    await ctx.reply('Error fetching definition.');
+  }
+});
+
+bot.command('image', async (ctx) => {
+  const query = ctx.message.text.split(' ').slice(1).join(' ');
+  if (!query) {
+    await ctx.reply('Please provide a search term. Example: /image cute cats');
+    return;
+  }
+  try {
+    const results = await ddg.imageSearch(query);
+    await ctx.reply(results);
+  } catch (error) {
+    await ctx.reply('Error searching for images.');
+  }
+});
+
+bot.command('video', async (ctx) => {
+  const query = ctx.message.text.split(' ').slice(1).join(' ');
+  if (!query) {
+    await ctx.reply('Please provide a search term. Example: /video cooking tutorial');
+    return;
+  }
+  try {
+    const results = await ddg.videoSearch(query);
+    await ctx.reply(results);
+  } catch (error) {
+    await ctx.reply('Error searching for videos.');
+  }
+});
+
+bot.command('news', async (ctx) => {
+  const query = ctx.message.text.split(' ').slice(1).join(' ');
+  if (!query) {
+    await ctx.reply('Please provide a search term. Example: /news technology');
+    return;
+  }
+  try {
+    const results = await ddg.newsSearch(query);
+    await ctx.reply(results);
+  } catch (error) {
+    await ctx.reply('Error searching news.');
+  }
+});
+
+bot.command('time', async (ctx) => {
+  const location = ctx.message.text.split(' ').slice(1).join(' ');
+  if (!location) {
+    await ctx.reply('Please provide a location. Example: /time New York');
+    return;
+  }
+  try {
+    const timeInfo = await ddg.getTimeForLocation(location);
+    await ctx.reply(timeInfo);
+  } catch (error) {
+    await ctx.reply('Error getting time information.');
+  }
+});
+
+bot.command('weather', async (ctx) => {
+  const location = ctx.message.text.split(' ').slice(1).join(' ');
+  if (!location) {
+    await ctx.reply('Please provide a location. Example: /weather London');
+    return;
+  }
+  try {
+    const forecast = await ddg.getWeatherForecast(location);
+    await ctx.reply(forecast);
+  } catch (error) {
+    await ctx.reply('Error getting weather forecast.');
+  }
+});
+
+bot.command('dict', async (ctx) => {
+  const word = ctx.message.text.split(' ')[1];
+  if (!word) {
+    await ctx.reply('Please provide a word. Example: /dict happiness');
+    return;
+  }
+  try {
+    const wordInfo = await ddg.getDictionaryInfo(word);
+    await ctx.reply(wordInfo);
+  } catch (error) {
+    await ctx.reply('Error getting word information.');
+  }
+});
+
+bot.command('find_video', async (ctx) => {
+  const query = ctx.message.text.split(' ').slice(1).join(' ');
+  if (!query) {
+    await ctx.reply('Please provide what video you are looking for. Example: /find_video battlefield 2024 pre alpha footage');
+    return;
+  }
+  
+  try {
+    const results = await ddg.findVideoContent(query);
+    await ctx.reply(results);
+  } catch (error) {
+    await ctx.reply('Error searching for video content.');
+  }
+});
+
+// Add helper function at the top level
+function isVideoSearchQuery(text: string): boolean {
+  const videoKeywords = [
+    'video', 'footage', 'trailer', 'teaser', 'preview',
+    'gameplay', 'stream', 'watch', 'clip', 'show me'
+  ];
+  return videoKeywords.some(keyword => text.toLowerCase().includes(keyword));
+}
+
 // Modify message handler
 bot.on('text', async (ctx) => {
   const chatId = ctx.chat.id;
@@ -151,67 +304,72 @@ bot.on('text', async (ctx) => {
         msg.content
       ] as ['human' | 'assistant', string]);
 
-    // Get context from Perplexica and Firecrawl
+    // Get search contexts
     let searchContext = '';
+    let ddgSearchContext = '';
+    let videoContext = '';
+
     try {
-      // 1. Get search results from Perplexica
+      // Check if this might be a video-related query
+      if (isVideoSearchQuery(messageText)) {
+        const videoResults = await ddg.findVideoContent(messageText);
+        videoContext = `\nVIDEO SEARCH RESULTS:\n${videoResults}\n`;
+      }
+
+      // Get Perplexica results
       const searchResult: SearchResponse = await perplexicaSearch.search(messageText, {
         focusMode: 'webSearch',
         history: perplexicaHistory
       });
 
-      // 2. Use Firecrawl to extract content from each URL
-      const urlContents = await Promise.all(
-        searchResult.sources.slice(0, 3).map(async (source: any) => {
-          try {
-            const content: FirecrawlResult = await firecrawl.scrapeUrl(source.metadata.url);
-            return {
-              url: source.metadata.url,
-              ...content
-            };
-          } catch (error: any) {
-            console.warn(`Failed to scrape ${source.metadata.url}:`, error.message);
-            return null;
-          }
-        })
-      );
-
-      // 3. Build context from search results and scraped content
-      const validContents = urlContents.filter(content => content !== null);
-      
+      // Build context from search results with safe property access
       searchContext = `
 WEB SEARCH OVERVIEW:
-${searchResult.message}
+${searchResult.message || 'No overview available'}
 
 DETAILED SOURCES:
-${validContents.map((content: any, i: number) => `
-[${i + 1}] ${searchResult.sources[i].metadata.title}
-URL: ${content?.url}
-SUMMARY: ${content?.summary}
-KEY POINTS:
-${content?.keyPoints?.map((point: any) => `- ${point}`).join('\n') || 'No key points available'}
-CONTENT EXCERPT: ${content?.content.substring(0, 500)}...
-`).join('\n')}`;
+${searchResult.sources?.map((source: any, i: number) => {
+  const title = source?.metadata?.title || 'No title';
+  const url = source?.metadata?.url || 'No URL';
+  const content = source?.content || 'No content available';
+  
+  return `
+[${i + 1}] ${title}
+URL: ${url}
+CONTENT: ${content.length > 500 ? content.substring(0, 500) + '...' : content}`;
+}).join('\n') || 'No sources available'}`;
+
+      // Get DDG results
+      const ddgResults = await ddg.regularSearch(messageText);
+      ddgSearchContext = `
+DUCKDUCKGO SEARCH RESULTS:
+${ddgResults}
+`;
 
     } catch (error: any) {
-      console.warn('Search or scraping failed:', error.message);
+      console.warn('Search failed:', error.message);
       searchContext = '(Web search unavailable. Using base knowledge and conversation history.)';
     }
 
-    // Prepare the prompt with context and history
+    // Prepare the prompt with all contexts
     const historyContext = session.history
       .slice(-5) // Last 5 messages for context
       .map(msg => `${msg.role}: ${msg.content}`)
       .join('\n');
 
     const prompt = `
-You are an AI assistant with access to web search results and their full content.
+You are an AI assistant with access to web search results from multiple sources.
 Use this information to provide accurate, well-informed responses.
+If the user is asking about videos, focus on providing direct video links when available.
 
 Previous conversation:
 ${historyContext}
 
 ${searchContext}
+
+${ddgSearchContext}
+
+${videoContext}
 
 User Query: ${messageText}
 
@@ -279,15 +437,6 @@ Let's approach this step by step:`;
     await ctx.reply('Sorry, I encountered an error while processing your message. Please try again.');
   }
 });
-
-async function fetchFirecrawlContent(url: string): Promise<FirecrawlResult | null> {
-  try {
-    return await firecrawl.scrapeUrl(url);
-  } catch (error: any) {
-    console.warn(`Failed to fetch content from Firecrawl for ${url}:`, error.message);
-    return null;
-  }
-}
 
 // Handle errors
 bot.catch((err: any, ctx) => {
