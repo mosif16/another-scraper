@@ -1,7 +1,9 @@
 import { config } from 'dotenv';
 import { Telegraf } from 'telegraf';
 import axios from 'axios';
-import { PerplexicaSearch } from './PerplexicaSearch.js';
+import { PerplexicaSearch, SearchResponse } from './PerplexicaSearch.js';
+import { FirecrawlService } from './FirecrawlService.js';
+import { FirecrawlResponse, FirecrawlResult } from './types.js';
 
 // Load environment variables
 config();
@@ -10,7 +12,7 @@ config();
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ALLOWED_CHAT_ID = Number(process.env.ALLOWED_CHAT_ID);
 const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || 'http://localhost:11434';
-const DEFAULT_MODEL = process.env.DEFAULT_MODEL || 'mistral-small:24b-instruct-2501-q4_K_M';
+const DEFAULT_MODEL = process.env.DEFAULT_MODEL || 'deepseek-r1:14b';
 
 // Validate required environment variables
 if (!BOT_TOKEN || !ALLOWED_CHAT_ID) {
@@ -18,9 +20,10 @@ if (!BOT_TOKEN || !ALLOWED_CHAT_ID) {
   process.exit(1);
 }
 
-// Initialize bot
+// Initialize bot and services
 const bot = new Telegraf(BOT_TOKEN);
 const perplexicaSearch = new PerplexicaSearch(process.env.PERPLEXICA_BASE_URL);
+const firecrawl = new FirecrawlService('http://localhost:3002'); // Use local Docker instance
 
 // Store active chats
 const activeChats = new Set<number>();
@@ -148,24 +151,50 @@ bot.on('text', async (ctx) => {
         msg.content
       ] as ['human' | 'assistant', string]);
 
-    // Get context from Perplexica with history
+    // Get context from Perplexica and Firecrawl
     let searchContext = '';
     try {
-      const searchResult = await perplexicaSearch.search(messageText, {
+      // 1. Get search results from Perplexica
+      const searchResult: SearchResponse = await perplexicaSearch.search(messageText, {
         focusMode: 'webSearch',
         history: perplexicaHistory
       });
 
+      // 2. Use Firecrawl to extract content from each URL
+      const urlContents = await Promise.all(
+        searchResult.sources.slice(0, 3).map(async (source: any) => {
+          try {
+            const content: FirecrawlResult = await firecrawl.scrapeUrl(source.metadata.url);
+            return {
+              url: source.metadata.url,
+              ...content
+            };
+          } catch (error: any) {
+            console.warn(`Failed to scrape ${source.metadata.url}:`, error.message);
+            return null;
+          }
+        })
+      );
+
+      // 3. Build context from search results and scraped content
+      const validContents = urlContents.filter(content => content !== null);
+      
       searchContext = `
-WEB SEARCH RESULTS:
+WEB SEARCH OVERVIEW:
 ${searchResult.message}
 
-RELEVANT SOURCES:
-${searchResult.sources.map((source, i) => 
-  `[${i + 1}] ${source.metadata.title}\n    URL: ${source.metadata.url}`
-).join('\n\n')}`;
-    } catch (error) {
-      console.warn('Perplexica search failed:', error);
+DETAILED SOURCES:
+${validContents.map((content: any, i: number) => `
+[${i + 1}] ${searchResult.sources[i].metadata.title}
+URL: ${content?.url}
+SUMMARY: ${content?.summary}
+KEY POINTS:
+${content?.keyPoints?.map((point: any) => `- ${point}`).join('\n') || 'No key points available'}
+CONTENT EXCERPT: ${content?.content.substring(0, 500)}...
+`).join('\n')}`;
+
+    } catch (error: any) {
+      console.warn('Search or scraping failed:', error.message);
       searchContext = '(Web search unavailable. Using base knowledge and conversation history.)';
     }
 
@@ -176,6 +205,9 @@ ${searchResult.sources.map((source, i) =>
       .join('\n');
 
     const prompt = `
+You are an AI assistant with access to web search results and their full content.
+Use this information to provide accurate, well-informed responses.
+
 Previous conversation:
 ${historyContext}
 
@@ -183,7 +215,8 @@ ${searchContext}
 
 User Query: ${messageText}
 
-Provide a helpful response using both the conversation history and available information:`;
+Think through the available information step by step, then provide your response after </think>.
+Let's approach this step by step:`;
 
     // Get response from Ollama
     const response = await axios.post(`${OLLAMA_BASE_URL}/api/chat`, {
@@ -191,7 +224,7 @@ Provide a helpful response using both the conversation history and available inf
       messages: [
         {
           role: 'system',
-          content: 'You are a helpful AI assistant with access to web search.'
+          content: 'You are a helpful AI assistant. Always structure your responses with your thinking process first, followed by </think> and then your final response.'
         },
         {
           role: 'user',
@@ -200,14 +233,23 @@ Provide a helpful response using both the conversation history and available inf
       ],
       stream: false,
       options: {
-        temperature: 0.15,
+        temperature: 0.6,
         top_k: 50,
         top_p: 0.95,
-        num_ctx: 16384  // Increased from 4096 to 16384
+        num_ctx: 16384
       }
     });
 
-    const responseText = response.data?.message?.content || 'Sorry, I could not generate a response.';
+    let responseText = response.data?.message?.content || 'Sorry, I could not generate a response.';
+
+    // Extract only the content after </think>
+    const thinkingSplit = responseText.split('</think>');
+    if (thinkingSplit.length > 1) {
+      responseText = thinkingSplit[1].trim();
+    } else {
+      // If no </think> tag is found, use the whole response but add a warning
+      console.warn('No </think> tag found in response');
+    }
 
     if (!responseText || responseText.trim().length === 0) {
       throw new Error('Empty response from Ollama');
@@ -232,22 +274,31 @@ Provide a helpful response using both the conversation history and available inf
       }
     }
 
-  } catch (error) {
-    console.error('Error processing message:', error);
+  } catch (error: any) {
+    console.error('Error processing message:', error.message);
     await ctx.reply('Sorry, I encountered an error while processing your message. Please try again.');
   }
 });
 
+async function fetchFirecrawlContent(url: string): Promise<FirecrawlResult | null> {
+  try {
+    return await firecrawl.scrapeUrl(url);
+  } catch (error: any) {
+    console.warn(`Failed to fetch content from Firecrawl for ${url}:`, error.message);
+    return null;
+  }
+}
+
 // Handle errors
-bot.catch((err: unknown, ctx) => {
-  console.error('Bot error:', err);
+bot.catch((err: any, ctx) => {
+  console.error('Bot error:', err.message);
 });
 
 // Start bot
 bot.launch().then(() => {
   console.log('Bot is running...');
-}).catch((error) => {
-  console.error('Failed to start bot:', error);
+}).catch((error: any) => {
+  console.error('Failed to start bot:', error.message);
 });
 
 // Enable graceful stop

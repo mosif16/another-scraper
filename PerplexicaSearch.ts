@@ -17,10 +17,11 @@ interface SearchSource {
   metadata: {
     title: string;
     url: string;
+    publishedDate?: string;
   };
 }
 
-interface SearchResponse {
+export interface SearchResponse {
   message: string;
   sources: SearchSource[];
 }
@@ -38,6 +39,8 @@ interface SearchRequest {
   query: string;
   history?: HistoryEntry[];
   searchDate?: string;
+  recencyBoost?: boolean;
+  maxAgeDays?: number;
 }
 
 export class PerplexicaSearch {
@@ -51,23 +54,52 @@ export class PerplexicaSearch {
     return new Date().toISOString().split('T')[0];
   }
 
+  private getDateRange(maxAgeDays: number = 30): { start: string; end: string } {
+    const end = new Date();
+    const start = new Date();
+    start.setDate(start.getDate() - maxAgeDays);
+    return {
+      start: start.toISOString().split('T')[0],
+      end: end.toISOString().split('T')[0]
+    };
+  }
+
   async search(query: string, options: Omit<SearchRequest, 'query'>): Promise<SearchResponse> {
     try {
+      const dateRange = this.getDateRange(options.maxAgeDays || 30);
       const response = await axios.post<SearchResponse>(`${this.baseUrl}/api/search`, {
         query,
-        searchDate: this.getCurrentDate(), // Add current date to each search
+        searchDate: this.getCurrentDate(),
+        recencyBoost: true, // Always boost recent content
+        dateRange: {
+          start: dateRange.start,
+          end: dateRange.end
+        },
         chatModel: options.chatModel || {
           provider: 'ollama',
           model: 'mistral-small:24b-instruct-2501-q4_K_M',
-          temperature: 0.15  // Add temperature setting
+          temperature: 0.15
         },
         embeddingModel: options.embeddingModel || {
           provider: 'ollama',
           model: 'snowflake-arctic-embed2:latest'
         },
         focusMode: options.focusMode,
-        optimizationMode: options.optimizationMode || 'balanced',
+        optimizationMode: 'balanced', // Changed back to balanced
+        searchOptions: {
+          filterDuplicates: true,
+          prioritizeRecent: true,
+          minRelevanceScore: 0.6, // Adjusted for balanced approach
+          maxResults: 8 // Increased results for better context
+        },
         history: options.history || []
+      });
+
+      // Sort sources by date if available
+      response.data.sources.sort((a, b) => {
+        const dateA = a.metadata.publishedDate ? new Date(a.metadata.publishedDate) : new Date(0);
+        const dateB = b.metadata.publishedDate ? new Date(b.metadata.publishedDate) : new Date(0);
+        return dateB.getTime() - dateA.getTime();
       });
 
       return response.data;
