@@ -3,6 +3,8 @@ import { Telegraf } from 'telegraf';
 import axios from 'axios';
 import { PerplexicaSearch, SearchResponse } from './PerplexicaSearch.js';
 import { DuckDuckGoService } from './services/DuckDuckGoService.js';
+import { BraveSearchService } from './services/BraveSearchService.js';
+import { OutputFormatter } from './services/OutputFormatter.js';
 
 // Load environment variables
 config();
@@ -23,6 +25,10 @@ if (!BOT_TOKEN || !ALLOWED_CHAT_ID) {
 const bot = new Telegraf(BOT_TOKEN);
 const perplexicaSearch = new PerplexicaSearch(process.env.PERPLEXICA_BASE_URL);
 const ddg = new DuckDuckGoService();
+const braveSearch = new BraveSearchService(
+  process.env.BRAVE_SEARCH_API_KEY || '',
+  process.env.BRAVE_SEARCH_BASE_URL || 'https://api.search.brave.com/res/v1'
+);
 
 // Store active chats
 const activeChats = new Set<number>();
@@ -260,7 +266,28 @@ function isVideoSearchQuery(text: string): boolean {
   return videoKeywords.some(keyword => text.toLowerCase().includes(keyword));
 }
 
-// Modify message handler
+// Add helper function to detect news-related queries
+function isNewsRelated(text: string): boolean {
+  const newsKeywords = [
+    'news', 'latest', 'recent', 'update', 'announcement',
+    'today', 'yesterday', 'this week', 'breaking'
+  ];
+  return newsKeywords.some(keyword => text.toLowerCase().includes(keyword));
+}
+
+// Add status emoji constants
+const STATUS = {
+  SUCCESS: '✅',
+  ERROR: '❌',
+  PENDING: '⏳',
+  WARNING: '⚠️',
+  BRAVE: '🦁',
+  DDG: '🔍',
+  PERPLEXICA: '🌐',
+  OLLAMA: '🤖'
+};
+
+// Modify message handler to use time-sensitive search
 bot.on('text', async (ctx) => {
   const chatId = ctx.chat.id;
   const messageText = ctx.message.text;
@@ -273,6 +300,27 @@ bot.on('text', async (ctx) => {
   }
 
   try {
+    const statusMessage = await ctx.reply(`${STATUS.PENDING} Processing your request...`);
+    let searchStatus = {
+      perplexica: STATUS.PENDING,
+      ddg: STATUS.PENDING,
+      brave: STATUS.PENDING,
+      ollama: STATUS.PENDING
+    };
+
+    const updateStatus = async () => {
+      await ctx.telegram.editMessageText(
+        statusMessage.chat.id,
+        statusMessage.message_id,
+        undefined,
+        `Search Status:
+${searchStatus.perplexica} Perplexica
+${searchStatus.ddg} DuckDuckGo
+${searchStatus.brave} Brave Search
+${searchStatus.ollama} Ollama Processing`
+      );
+    };
+
     await ctx.replyWithChatAction('typing');
 
     // Get or initialize chat session
@@ -304,26 +352,48 @@ bot.on('text', async (ctx) => {
         msg.content
       ] as ['human' | 'assistant', string]);
 
-    // Get search contexts
+    // Get search contexts with status updates
     let searchContext = '';
     let ddgSearchContext = '';
+    let braveSearchContext = '';
     let videoContext = '';
 
     try {
-      // Check if this might be a video-related query
-      if (isVideoSearchQuery(messageText)) {
-        const videoResults = await ddg.findVideoContent(messageText);
-        videoContext = `\nVIDEO SEARCH RESULTS:\n${videoResults}\n`;
+      // Add Brave search results with time sensitivity
+      try {
+        const braveResults = await braveSearch.search(messageText, {
+          freshness: isNewsRelated(messageText) ? 'past_day' : 'past_week'
+        });
+        braveSearchContext = `\nBRAVE SEARCH RESULTS:\n${braveResults}\n`;
+        searchStatus.brave = STATUS.SUCCESS;
+      } catch (error) {
+        searchStatus.brave = STATUS.ERROR;
+        console.warn('Brave search failed:', error);
       }
+      await updateStatus();
+
+      // Get DDG results
+      try {
+        const ddgResults = await ddg.regularSearch(messageText);
+        ddgSearchContext = `\nDUCKDUCKGO SEARCH RESULTS:\n${ddgResults}\n`;
+        if (isVideoSearchQuery(messageText)) {
+          const videoResults = await ddg.findVideoContent(messageText);
+          videoContext = `\nVIDEO SEARCH RESULTS:\n${videoResults}\n`;
+        }
+        searchStatus.ddg = STATUS.SUCCESS;
+      } catch (error) {
+        searchStatus.ddg = STATUS.ERROR;
+        console.warn('DDG search failed:', error);
+      }
+      await updateStatus();
 
       // Get Perplexica results
-      const searchResult: SearchResponse = await perplexicaSearch.search(messageText, {
-        focusMode: 'webSearch',
-        history: perplexicaHistory
-      });
-
-      // Build context from search results with safe property access
-      searchContext = `
+      try {
+        const searchResult: SearchResponse = await perplexicaSearch.search(messageText, {
+          focusMode: 'webSearch',
+          history: perplexicaHistory
+        });
+        searchContext = `
 WEB SEARCH OVERVIEW:
 ${searchResult.message || 'No overview available'}
 
@@ -338,26 +408,20 @@ ${searchResult.sources?.map((source: any, i: number) => {
 URL: ${url}
 CONTENT: ${content.length > 500 ? content.substring(0, 500) + '...' : content}`;
 }).join('\n') || 'No sources available'}`;
+        searchStatus.perplexica = STATUS.SUCCESS;
+      } catch (error) {
+        searchStatus.perplexica = STATUS.ERROR;
+        console.warn('Perplexica search failed:', error);
+      }
+      await updateStatus();
 
-      // Get DDG results
-      const ddgResults = await ddg.regularSearch(messageText);
-      ddgSearchContext = `
-DUCKDUCKGO SEARCH RESULTS:
-${ddgResults}
-`;
+      // Prepare the prompt with all contexts
+      const historyContext = session.history
+        .slice(-5) // Last 5 messages for context
+        .map(msg => `${msg.role}: ${msg.content}`)
+        .join('\n');
 
-    } catch (error: any) {
-      console.warn('Search failed:', error.message);
-      searchContext = '(Web search unavailable. Using base knowledge and conversation history.)';
-    }
-
-    // Prepare the prompt with all contexts
-    const historyContext = session.history
-      .slice(-5) // Last 5 messages for context
-      .map(msg => `${msg.role}: ${msg.content}`)
-      .join('\n');
-
-    const prompt = `
+      const prompt = `
 You are an AI assistant with access to web search results from multiple sources.
 Use this information to provide accurate, well-informed responses.
 If the user is asking about videos, focus on providing direct video links when available.
@@ -369,6 +433,8 @@ ${searchContext}
 
 ${ddgSearchContext}
 
+${braveSearchContext}
+
 ${videoContext}
 
 User Query: ${messageText}
@@ -376,60 +442,86 @@ User Query: ${messageText}
 Think through the available information step by step, then provide your response after </think>.
 Let's approach this step by step:`;
 
-    // Get response from Ollama
-    const response = await axios.post(`${OLLAMA_BASE_URL}/api/chat`, {
-      model: DEFAULT_MODEL,
-      messages: [
-        {
-          role: 'system',
-          content: 'You are a helpful AI assistant. Always structure your responses with your thinking process first, followed by </think> and then your final response.'
-        },
-        {
-          role: 'user',
-          content: prompt
+      // Get response from Ollama
+      try {
+        const response = await axios.post(`${OLLAMA_BASE_URL}/api/chat`, {
+          model: DEFAULT_MODEL,
+          messages: [
+            {
+              role: 'system',
+              content: 'You are a helpful AI assistant. Always structure your responses with your thinking process first, followed by </think> and then your final response.'
+            },
+            {
+              role: 'user',
+              content: prompt
+            }
+          ],
+          stream: false,
+          options: {
+            temperature: 0.6,
+            top_k: 50,
+            top_p: 0.95,
+            num_ctx: 16384
+          }
+        });
+
+        searchStatus.ollama = STATUS.SUCCESS;
+        await updateStatus();
+
+        let responseText = response.data?.message?.content || 'Sorry, I could not generate a response.';
+
+        // Format the response using OutputFormatter
+        const formattedResponse = OutputFormatter.formatResponse(
+          responseText,
+          searchStatus,
+          false // Set to true if you want to include thinking process
+        );
+
+        // Send response in chunks if needed
+        const maxLength = 4096;
+        if (formattedResponse.length <= maxLength) {
+          await ctx.reply(formattedResponse);
+        } else {
+          // Split by sections to maintain formatting
+          const sections = formattedResponse.split('\n\n');
+          let currentMessage = '';
+          
+          for (const section of sections) {
+            if ((currentMessage + section).length > maxLength) {
+              if (currentMessage) {
+                await ctx.reply(currentMessage);
+                currentMessage = '';
+              }
+              if (section.length > maxLength) {
+                // Split long sections
+                for (let i = 0; i < section.length; i += maxLength) {
+                  await ctx.reply(section.substring(i, i + maxLength));
+                }
+              } else {
+                currentMessage = section;
+              }
+            } else {
+              currentMessage += (currentMessage ? '\n\n' : '') + section;
+            }
+          }
+          
+          if (currentMessage) {
+            await ctx.reply(currentMessage);
+          }
         }
-      ],
-      stream: false,
-      options: {
-        temperature: 0.6,
-        top_k: 50,
-        top_p: 0.95,
-        num_ctx: 16384
+
+      } catch (error) {
+        searchStatus.ollama = STATUS.ERROR;
+        await updateStatus();
+        throw error;
       }
-    });
 
-    let responseText = response.data?.message?.content || 'Sorry, I could not generate a response.';
-
-    // Extract only the content after </think>
-    const thinkingSplit = responseText.split('</think>');
-    if (thinkingSplit.length > 1) {
-      responseText = thinkingSplit[1].trim();
-    } else {
-      // If no </think> tag is found, use the whole response but add a warning
-      console.warn('No </think> tag found in response');
-    }
-
-    if (!responseText || responseText.trim().length === 0) {
-      throw new Error('Empty response from Ollama');
-    }
-
-    // Add assistant response to history
-    session.history.push({
-      role: 'assistant',
-      content: responseText,
-      timestamp: Date.now()
-    });
-    session.lastActive = Date.now();
-
-    // Send response in chunks if too long
-    const maxLength = 4096;
-    if (responseText.length <= maxLength) {
-      await ctx.reply(responseText);
-    } else {
-      for (let i = 0; i < responseText.length; i += maxLength) {
-        const chunk = responseText.substring(i, i + maxLength);
-        await ctx.reply(chunk);
-      }
+    } catch (error: any) {
+      console.error('Search failed:', error.message);
+      await ctx.reply('Sorry, I encountered an error while processing your message. Please try again.');
+    } finally {
+      // Delete the status message after completion
+      await ctx.telegram.deleteMessage(statusMessage.chat.id, statusMessage.message_id);
     }
 
   } catch (error: any) {

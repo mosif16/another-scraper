@@ -1,19 +1,19 @@
 import * as DDG from 'duck-duck-scrape';
 import { SafeSearchType } from 'duck-duck-scrape';
 
-// Add proper type definitions
-interface DDGSearchOptions {
-  safeSearch?: SafeSearchType;
-  region?: string;
-  time?: string;
-  count?: number;
+// Update type definitions to match duck-duck-scrape options
+interface ExtendedSearchOptions extends DDG.SearchOptions {
+  time?: 'd' | 'w' | 'm' | 'y';
 }
 
 export class DuckDuckGoService {
   private safeSearch: SafeSearchType = SafeSearchType.MODERATE;
 
   async regularSearch(query: string) {
-    const results = await DDG.search(query, { safeSearch: this.safeSearch });
+    const results = await DDG.search(query, { 
+      safeSearch: this.safeSearch,
+      time: 'w'  // Last week results
+    });
     return this.formatSearchResults(results);
   }
 
@@ -34,8 +34,11 @@ export class DuckDuckGoService {
   }
 
   async newsSearch(query: string) {
-    // Use separate news search method
-    const results = await DDG.searchNews(query);
+    // Use regular search with time parameter
+    const results = await DDG.search(query, {
+      safeSearch: this.safeSearch,
+      time: 'd'  // Last day for news
+    });
     return this.formatNewsResults(results);
   }
 
@@ -90,15 +93,16 @@ export class DuckDuckGoService {
 
   async findVideoContent(query: string) {
     try {
-      // First try video search
-      const videoResults = await DDG.search(query, {
+      // First try video search with recent results
+      const videoResults = await DDG.search(query + ' video', {
         safeSearch: this.safeSearch,
-        time: 'y' // Last year
+        time: 'w' // Last week
       });
 
-      // Then try regular search
+      // Then try regular search with time filter
       const webResults = await DDG.search(query + ' official video', {
-        safeSearch: this.safeSearch
+        safeSearch: this.safeSearch,
+        time: 'm' // Last month for broader coverage
       });
 
       return this.formatVideoContentResults(videoResults, webResults);
